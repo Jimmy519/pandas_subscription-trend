@@ -1,0 +1,61 @@
+#Import the libraries needed
+import pandas as pd
+import datetime as dt
+from dateutil.relativedelta import relativedelta
+
+#Set the period of the subscription trend
+startDate  = dt.date(2025,1,1)
+endDate = dt.date(2025,8,1)
+monthsBtw = (endDate.year-startDate.year)*12 + endDate.month-startDate.month
+print(monthsBtw)
+
+period = []
+for i in range(0,monthsBtw):
+    period.append(startDate+relativedelta(months=i))
+
+print(period)
+
+program = 'service'
+filePath = r"C:\Users\JimmyYim\OneDrive - bolttech\Desktop\aggregata data\subscription_service.xlsx"
+print(filePath)
+
+df = pd.read_excel(filePath)
+
+#Drop useless status, plan codes, duplicate subscription
+df = df.drop(df[df.SUBSCRIPTION_STATUS.isin(['canceled','inactive','suspended','pendingForTermination'])].index)
+if program == 'HKT':
+    df = df.drop(df[df.PLAN_CODE.isin(['eagle-basic','REC06991002','HKTACS058001','HKTACS058002','HKTACS058003','HKTACS068001','HKTACS068002','HKTACS068003'])].index)
+else:
+    df = df.drop(df[~df.PLAN_CODE.isin(['eagle-basic','REC06991002','HKTACS058001','HKTACS058002','HKTACS058003','HKTACS068001','HKTACS068002','HKTACS068003'])].index)
+# df['Duplicate']=df['CUSTOMER_ID']+df['DEVICE_IMEI']
+# df = df.drop_duplicates(subset=['Duplicate'])
+print(len(df))
+    
+#Fill blank end month
+df['END_DATE'] = df['END_DATE'].fillna(dt.date(2099,1,1))
+
+#Transform date type
+for i in ['ACTIVATION_DATE','END_DATE']:
+    df[i] = pd.to_datetime(df[i]).dt.date
+
+#Create 2 columns for new & end subscription
+# df['SubDays'] = (df['END_DATE']-df['ACTIVATION_DATE']).dt.days
+df['New']=df['ACTIVATION_DATE'].apply(lambda x: x.strftime('%Y-%m'))
+df['End']=df['END_DATE'].apply(lambda x: x.strftime('%Y-%m'))
+
+#Create Dictionary
+activeSub = {}
+for i in range(0,monthsBtw):
+    monthTBCompared = startDate+relativedelta(months=i)
+    monthKey = monthTBCompared.strftime('%Y-%m')
+    activeSub[monthKey] = {}
+    activeSub[monthKey]['active'] = len(df.loc[(df['New'] <= monthKey) & (df['End'] > monthKey)])
+    activeSub[monthKey]['new'] = len(df.loc[df['New'] == monthTBCompared.strftime('%Y-%m')])
+    activeSub[monthKey]['end'] = len(df.loc[df['End'] == monthTBCompared.strftime('%Y-%m')])
+    activeSub[monthKey]['change'] = activeSub[monthKey]['new'] - activeSub[monthKey]['end']
+print(activeSub)
+
+#Export to Excel
+df1 = pd.DataFrame.from_dict(activeSub, orient='index')
+print(df1)
+df1.to_excel(r'C:\Users\JimmyYim\OneDrive - bolttech\Desktop\subscription summary.xlsx')
