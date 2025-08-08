@@ -1,61 +1,113 @@
 #Import the libraries needed
 import pandas as pd
 import datetime as dt
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
+import math
+import xlsxwriter
 
 #Set the period of the subscription trend
-startDate  = dt.date(2025,1,1)
-endDate = dt.date(2025,8,1)
+startDate  = dt.date(2025,3,1)
+endDate = dt.date(2025,9,1)
 monthsBtw = (endDate.year-startDate.year)*12 + endDate.month-startDate.month
-print(monthsBtw)
+# print(monthsBtw)
 
 period = []
 for i in range(0,monthsBtw):
     period.append(startDate+relativedelta(months=i))
+# print(period)
 
-print(period)
-
-program = 'service'
-filePath = r"C:\Users\JimmyYim\OneDrive - bolttech\Desktop\aggregata data\subscription_service.xlsx"
-print(filePath)
-
+filePath = r"C:\Users\JimmyYim\OneDrive - bolttech\Desktop\aggregata data\subscription_HKTACS.xlsx"
 df = pd.read_excel(filePath)
+print('number of lines: ' + str(len(df)))
 
-#Drop useless status, plan codes, duplicate subscription
-df = df.drop(df[df.SUBSCRIPTION_STATUS.isin(['canceled','inactive','suspended','pendingForTermination'])].index)
-if program == 'HKT':
-    df = df.drop(df[df.PLAN_CODE.isin(['eagle-basic','REC06991002','HKTACS058001','HKTACS058002','HKTACS058003','HKTACS068001','HKTACS068002','HKTACS068003'])].index)
-else:
-    df = df.drop(df[~df.PLAN_CODE.isin(['eagle-basic','REC06991002','HKTACS058001','HKTACS058002','HKTACS058003','HKTACS068001','HKTACS068002','HKTACS068003'])].index)
-# df['Duplicate']=df['CUSTOMER_ID']+df['DEVICE_IMEI']
-# df = df.drop_duplicates(subset=['Duplicate'])
-print(len(df))
+#Drop status
+df = df.drop(df[df.SUBSCRIPTION_STATUS.isin(['canceled','suspended','pendingForTermination'])].index)
+print('number of lines after dropping status: ' + str(len(df)))
+
+#Drop test cases
+df = df.drop(df[df.CUSTOMER_LAST_NAME.isin(['PCCW-CKU1-MOBILE SALES','PCCW-CKU8-MOBILE'])].index)
+print('number of lines after dropping testing: ' + str(len(df)))
+
+#Drop duplicate
+df['Status_Combination']=df.groupby(['CUSTOMER_ID','DEVICE_IMEI'])['SUBSCRIPTION_STATUS'].transform(lambda x:','.join(sorted(x)))
+# print(df.loc[df['DEVICE_IMEI'] == 357507794968399])
+df = df.drop(df[(df.Status_Combination.isin(['active,terminated','inactive,terminated'])) & (df['SUBSCRIPTION_STATUS']=='terminated')].index)
+print('number of lines after dropping duplicate: ' + str(len(df)))
+df = df.drop(df[(df['Status_Combination'] == 'active,inactive') & (df['SUBSCRIPTION_STATUS']=='inactive')].index)
+print('number of lines after dropping active,inactive: ' + str(len(df)))
+df = df.drop_duplicates(subset=['SUBSCRIPTION_STATUS','CUSTOMER_ID','DEVICE_IMEI','Status_Combination'])
+print('number of lines after dropping double termination: ' + str(len(df)))
     
-#Fill blank end month
+#Modify end date
 df['END_DATE'] = df['END_DATE'].fillna(dt.date(2099,1,1))
+df.loc[df['SUBSCRIPTION_STATUS']=='inactive','END_DATE']=dt.date(2099,1,1)
+# print(df.loc[df['DEVICE_IMEI'] == 358574141928319,'END_DATE'])
+df['SUBSCRIPTION_STATUS']=df['SUBSCRIPTION_STATUS'].apply(lambda x:'active' if x=='inactive' else x)
 
 #Transform date type
 for i in ['ACTIVATION_DATE','END_DATE']:
-    df[i] = pd.to_datetime(df[i]).dt.date
+    df[i] = pd.to_datetime(df[i])
+
+#Recalculate active days
+today = datetime.combine(dt.date.today(), datetime.min.time())
+# print(today)
+df.loc[df['SUBSCRIPTION_STATUS']=='active','ACTIVE_DAYS'] = (today-df['ACTIVATION_DATE']).dt.days
+df['ACTIVE_DAYS'] = df['ACTIVE_DAYS'].apply(lambda x:1 if x==0 else x)
 
 #Create 2 columns for new & end subscription
-# df['SubDays'] = (df['END_DATE']-df['ACTIVATION_DATE']).dt.days
 df['New']=df['ACTIVATION_DATE'].apply(lambda x: x.strftime('%Y-%m'))
 df['End']=df['END_DATE'].apply(lambda x: x.strftime('%Y-%m'))
+# df.dtypes
 
-#Create Dictionary
+#Create trend
 activeSub = {}
 for i in range(0,monthsBtw):
-    monthTBCompared = startDate+relativedelta(months=i)
-    monthKey = monthTBCompared.strftime('%Y-%m')
+    monthKey = (startDate+relativedelta(months=i)).strftime('%Y-%m')
+    previousMonth = (startDate+relativedelta(months=i-1)).strftime('%Y-%m')
     activeSub[monthKey] = {}
     activeSub[monthKey]['active'] = len(df.loc[(df['New'] <= monthKey) & (df['End'] > monthKey)])
-    activeSub[monthKey]['new'] = len(df.loc[df['New'] == monthTBCompared.strftime('%Y-%m')])
-    activeSub[monthKey]['end'] = len(df.loc[df['End'] == monthTBCompared.strftime('%Y-%m')])
-    activeSub[monthKey]['change'] = activeSub[monthKey]['new'] - activeSub[monthKey]['end']
-print(activeSub)
+    activeSub[monthKey]['new'] = len(df.loc[df['New'] == monthKey])
+    activeSub[monthKey]['terminate'] = len(df.loc[df['End'] == monthKey])
+    activeSub[monthKey]['change'] = activeSub[monthKey]['new'] - activeSub[monthKey]['terminate']
+    try:
+        activeSub[monthKey]['churn'] = format((activeSub[monthKey]['terminate']/activeSub[monthKey]['active']),".1%")
+    except:
+        activeSub[monthKey]['churn'] = 0
+    try:
+        activeSub[monthKey]['MOM'] = format((activeSub[monthKey]['change']/activeSub[previousMonth]['active']),".1%")
+    except:
+        activeSub[monthKey]['MOM'] = 0
+        
+df_trend = pd.DataFrame.from_dict(activeSub, orient='index')
+print(df_trend)
+
+#Create by shop
+df_byshop = df.groupby(['SHOP_CODE'])['SUBSCRIPTION_STATUS'].value_counts().unstack(fill_value=0)
+df_byshop['Termination Rate'] = df_byshop['terminated']/(df_byshop['active']+df_byshop['terminated'])
+df_byshop.sort_values(by=['Termination Rate'], ascending=False, inplace=True)
+df_byshop['Termination Rate'] = df_byshop['Termination Rate'].apply(lambda x: f'{x:.1%}')
+df_byshop.head()
+
+#Create by subscription days
+maxActiveDays = math.ceil(df['ACTIVE_DAYS'].max()/30)
+# print(maxActiveDays)
+bins=[]
+for i in range(0,maxActiveDays+1):
+    bins.append(i*30)
+print(bins)
+
+df['bins'] = pd.cut(df['ACTIVE_DAYS'],bins)
+df_bysubdays = df.groupby(['bins'], observed=True)['End'].value_counts().unstack(fill_value=0)
+df_bysubdays.head()
 
 #Export to Excel
-df1 = pd.DataFrame.from_dict(activeSub, orient='index')
-print(df1)
-df1.to_excel(r'C:\Users\JimmyYim\OneDrive - bolttech\Desktop\subscription summary.xlsx')
+excelPath = r'C:\Users\JimmyYim\OneDrive - bolttech\Desktop\subscription summary_HKTACS.xlsx'
+writer = pd.ExcelWriter(excelPath, engine='xlsxwriter')
+
+# df.to_excel(writer,sheet_name='trend')
+df_trend.to_excel(writer,sheet_name='trend')
+df_bysubdays.to_excel(writer,sheet_name='by subscription days')
+df_byshop.to_excel(writer,sheet_name='by shop')
+
+writer.close()
